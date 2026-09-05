@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>WhatsApp GenAI Extension — Prototype (NOT the real WhatsApp)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --wa-green: #075E54;
+    --wa-light-green: #128C7E;
+    --wa-bubble-out: #DCF8C6;
+    --wa-bubble-in: #FFFFFF;
+    --wa-bg: #ECE5DD;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f0f0f0;
+    display: flex;
+    justify-content: center;
+    padding: 20px;
+  }
+  .app {
+    width: 100%;
+    max-width: 480px;
+    height: 90vh;
+    background: var(--wa-bg);
+    display: flex;
+    flex-direction: column;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+  }
+  .banner {
+    background: #FFF3CD;
+    color: #664D03;
+    font-size: 12px;
+    padding: 6px 12px;
+    text-align: center;
+  }
+  header {
+    background: var(--wa-green);
+    color: white;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { font-size: 11px; opacity: 0.8; }
+  .setup {
+    background: white;
+    padding: 12px;
+    border-bottom: 1px solid #ddd;
+    font-size: 13px;
+  }
+  .setup input, .setup select {
+    width: 100%;
+    padding: 6px 8px;
+    margin: 4px 0;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  .setup button, .composer button {
+    background: var(--wa-light-green);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .setup .row { display: flex; gap: 6px; align-items: center; }
+  .setup .row input { flex: 1; }
+  #authStatus { font-size: 12px; margin-top: 4px; color: #555; }
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .bubble {
+    max-width: 78%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 14px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    box-shadow: 0 1px 1px rgba(0,0,0,0.1);
+  }
+  .bubble.user { align-self: flex-end; background: var(--wa-bubble-out); }
+  .bubble.assistant { align-self: flex-start; background: var(--wa-bubble-in); }
+  .bubble.system { align-self: center; background: #FFF3CD; color: #664D03; font-size: 12px; }
+  .meta { font-size: 10px; color: #888; margin-top: 4px; }
+  .composer {
+    display: flex;
+    gap: 6px;
+    padding: 10px;
+    background: #f0f0f0;
+    border-top: 1px solid #ddd;
+  }
+  .composer input[type=text] {
+    flex: 1;
+    padding: 10px;
+    border-radius: 20px;
+    border: 1px solid #ccc;
+    font-size: 14px;
+  }
+  .composer button { border-radius: 20px; padding: 10px 14px; }
+  .composer button.recording { background: #d9534f; }
+  .attach-row {
+    display: flex;
+    gap: 6px;
+    padding: 0 10px 8px 10px;
+    background: #f0f0f0;
+  }
+  .attach-row input[type=file] { font-size: 11px; flex: 1; }
+  .attach-row input[type=text] { flex: 1; font-size: 12px; padding: 4px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="banner">⚠️ Prototype demo interface — NOT the real WhatsApp application</div>
+  <header>
+    <div>
+      <h1>WhatsApp GenAI Extension</h1>
+      <div class="sub" id="statusLine">Not connected</div>
+    </div>
+  </header>
+
+  <div class="setup">
+    <div class="row">
+      <input id="ownerIdInput" type="text" placeholder="Choose an owner_id, e.g. user_ravi" />
+      <button onclick="register()">Register / Get Key</button>
+    </div>
+    <div id="authStatus">No API key yet — register above.</div>
+  </div>
+
+  <div class="messages" id="messages"></div>
+
+  <div class="attach-row">
+    <input id="fileInput" type="file" />
+    <button onclick="uploadFile()">Upload doc</button>
+    <input id="urlInput" type="text" placeholder="https:// a public URL to ingest" />
+    <button onclick="ingestUrl()">Ingest URL</button>
+  </div>
+
+  <div class="composer">
+    <input id="messageInput" type="text" placeholder="Type a message..." onkeydown="if(event.key==='Enter') sendMessage()" />
+    <button id="micBtn" onclick="toggleRecording()">🎤</button>
+    <button onclick="sendMessage()">Send</button>
+  </div>
+</div>
+
+<script>
+const API_BASE = "/api/v1";
+let apiKey = null;
+let conversationId = "conv_" + Math.random().toString(36).slice(2, 8);
+let mediaRecorder = null;
+let audioChunks = [];
+
+function addBubble(role, text, meta) {
+  const el = document.createElement("div");
+  el.className = "bubble " + role;
+  el.textContent = text;
+  if (meta) {
+    const m = document.createElement("div");
+    m.className = "meta";
+    m.textContent = meta;
+    el.appendChild(m);
+  }
+  const box = document.getElementById("messages");
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+
+async function register() {
+  const ownerId = document.getElementById("ownerIdInput").value.trim();
+  if (!ownerId) { alert("Enter an owner_id first"); return; }
+  const res = await fetch(`${API_BASE}/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner_id: ownerId }),
+  });
+  if (!res.ok) {
+    document.getElementById("authStatus").textContent = "Registration failed: " + (await res.text());
+    return;
+  }
+  const data = await res.json();
+  apiKey = data.api_key;
+  document.getElementById("authStatus").textContent = "✅ Registered as " + ownerId + " — key stored in this browser session only.";
+  document.getElementById("statusLine").textContent = "Connected as " + ownerId;
+  addBubble("system", "Registered as " + ownerId + ". This demo interface is a prototype — not the real WhatsApp app.");
+}
+
+function requireAuth() {
+  if (!apiKey) {
+    alert("Register first to get an API key.");
+    return false;
+  }
+  return true;
+}
+
+async function sendMessage() {
+  if (!requireAuth()) return;
+  const input = document.getElementById("messageInput");
+  const message = input.value.trim();
+  if (!message) return;
+  addBubble("user", message);
+  input.value = "";
+
+  const res = await fetch(`${API_BASE}/converse`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
+    body: JSON.stringify({ conversation_id: conversationId, message }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    addBubble("system", "Error: " + (data.detail || res.statusText));
+    return;
+  }
+  const meta = `agent: ${data.agent_used}` + (data.sources && data.sources.length ? ` · sources: ${data.sources.join(", ")}` : "") + (data.verified === false ? " · ⚠️ unverified" : "");
+  addBubble("assistant", data.reply, meta);
+}
+
+async function uploadFile() {
+  if (!requireAuth()) return;
+  const fileInput = document.getElementById("fileInput");
+  if (!fileInput.files.length) { alert("Choose a file first"); return; }
+  const formData = new FormData();
+  formData.append("file", fileInput.files[0]);
+
+  addBubble("system", "Uploading " + fileInput.files[0].name + " ...");
+  const res = await fetch(`${API_BASE}/documents/upload`, {
+    method: "POST",
+    headers: { "X-API-Key": apiKey },
+    body: formData,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    addBubble("system", "Upload failed: " + (data.detail || res.statusText));
+    return;
+  }
+  addBubble("system", `Indexed "${data.filename}" — ${data.chunks_indexed} chunks. Ask about it in chat.`);
+  fileInput.value = "";
+}
+
+async function ingestUrl() {
+  if (!requireAuth()) return;
+  const urlInput = document.getElementById("urlInput");
+  const url = urlInput.value.trim();
+  if (!url) { alert("Enter a URL first"); return; }
+
+  addBubble("system", "Fetching " + url + " ...");
+  const res = await fetch(`${API_BASE}/mcp/ingest-url`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
+    body: JSON.stringify({ url }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    addBubble("system", "Ingest failed: " + (data.detail || res.statusText));
+    return;
+  }
+  addBubble("system", `Indexed "${data.filename}" — ${data.chunks_indexed} chunks. Ask about it in chat.`);
+  urlInput.value = "";
+}
+
+async function toggleRecording() {
+  if (!requireAuth()) return;
+  const micBtn = document.getElementById("micBtn");
+
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+    micBtn.classList.remove("recording");
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
+    mediaRecorder.onstop = sendVoiceMessage;
+    mediaRecorder.start();
+    micBtn.classList.add("recording");
+    addBubble("system", "Recording... click 🎤 again to stop.");
+  } catch (e) {
+    addBubble("system", "Microphone access denied or unavailable: " + e.message);
+  }
+}
+
+async function sendVoiceMessage() {
+  const blob = new Blob(audioChunks, { type: "audio/webm" });
+  const formData = new FormData();
+  formData.append("conversation_id", conversationId);
+  formData.append("file", blob, "voice.webm");
+
+  addBubble("system", "Transcribing voice message...");
+  const res = await fetch(`${API_BASE}/voice/converse`, {
+    method: "POST",
+    headers: { "X-API-Key": apiKey },
+    body: formData,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    addBubble("system", "Voice message failed: " + (data.detail || res.statusText));
+    return;
+  }
+  addBubble("user", data.transcript, "🎤 voice");
+  const meta = `agent: ${data.agent_used}` + (data.sources && data.sources.length ? ` · sources: ${data.sources.join(", ")}` : "");
+  addBubble("assistant", data.reply, meta);
+}
+</script>
+</body>
+</html>
