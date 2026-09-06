@@ -20,8 +20,7 @@ trafilatura==1.12.2
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1
 google-api-python-client==2.149.0
-faster-whisper==1.0.3
-
+faster-whisper
 # --- Phase 5: security hardening ---
 cryptography==43.0.1
 
