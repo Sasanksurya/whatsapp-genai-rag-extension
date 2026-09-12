@@ -9,6 +9,7 @@ from app.api.routes_converse import router as converse_router
 from app.api.routes_mcp import router as mcp_router
 from app.api.routes_voice import router as voice_router
 from app.api.routes_whatsapp import router as whatsapp_router
+from app.api.routes_twilio import router as twilio_router
 from app.core.security_headers import SecurityHeadersMiddleware
 
 app = FastAPI(
@@ -39,6 +40,7 @@ app.include_router(converse_router, prefix="/api/v1")
 app.include_router(mcp_router, prefix="/api/v1")
 app.include_router(voice_router, prefix="/api/v1")
 app.include_router(whatsapp_router, prefix="/api/v1")
+app.include_router(twilio_router, prefix="/api/v1")
 
 app.mount("/demo", StaticFiles(directory="static", html=True), name="demo")
 

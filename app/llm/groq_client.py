@@ -7,6 +7,7 @@ here rather than importing the Groq SDK directly — that keeps the
 provider swappable and makes context-minimization enforceable in
 one place (see Phase 5: Security Hardening).
 """
+
 from groq import Groq
 from app.core.config import settings
 
@@ -34,13 +35,40 @@ class LLMGateway:
         completion = self._client.chat.completions.create(
             model=settings.groq_model,
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_message,
+                },
             ],
             temperature=0.3,
-            max_tokens=1024,
+
+            # GPT-OSS models use reasoning tokens as part of the
+            # completion budget. Give the model enough room to
+            # reason briefly and then produce the actual answer.
+            max_completion_tokens=4096,
+
+            # Low reasoning is sufficient for document Q&A and
+            # prevents the model from spending the entire budget
+            # on internal reasoning.
+            reasoning_effort="low",
+
+            # We only need the final answer in message.content.
+            include_reasoning=False,
         )
-        return completion.choices[0].message.content
+
+        content = completion.choices[0].message.content
+
+        print("\n===== GROQ RESPONSE DEBUG =====")
+        print("MODEL:", settings.groq_model)
+        print("FINISH REASON:", completion.choices[0].finish_reason)
+        print("CONTENT:", repr(content))
+        print("===============================\n")
+
+        return content or ""
 
 
 # Singleton — imported by agents/routes instead of instantiating per-request

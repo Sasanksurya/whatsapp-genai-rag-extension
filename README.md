@@ -69,7 +69,7 @@ flowchart TD
 - **Security hardening** — rate limiting, audit logging, encrypted
   OAuth token storage, prompt-injection-resistant system prompts,
   webhook HMAC verification
-- **31 automated tests** covering auth, SSRF protection, encryption,
+- **36 automated tests** covering auth, SSRF protection, encryption,
   RAG routing, and webhook security
 
 ## Tech stack
@@ -82,7 +82,7 @@ flowchart TD
 | Vector store | ChromaDB (embedded) | free, no server/Docker needed |
 | Speech-to-text | faster-whisper (local) | free, no STT API cost |
 | Auth | API-key / WhatsApp phone identity | real authorization, not client-trusted |
-| Testing | pytest | 31 tests, offline-runnable |
+| Testing | pytest | 36 tests, offline-runnable |
 | Deployment | Docker + Render (free tier) | zero-cost hosting path |
 
 ## Quick start
@@ -131,6 +131,35 @@ Platform (see docs/BUILD_LOG.md Phase 6 for sourced details) — this
 project is scoped as a business's own document assistant for its
 clients, which fits Meta's sanctioned use case, rather than a general
 personal AI companion.
+
+## Alternative: Twilio WhatsApp Sandbox
+
+Meta's own developer account registration has intermittent platform
+bugs (a device-verification block, and separately an infinite loop in
+the "About you" / "Contact info" registration steps — both
+independently confirmed as widely-reported, active Meta-side issues,
+not anything wrong with this project's code). Rather than block on
+that, this project also includes a parallel **Twilio adapter**
+(`app/whatsapp_adapter/twilio_*.py`, `/api/v1/twilio/webhook`) — Twilio
+already has its own completed Meta Business verification, so their
+free WhatsApp Sandbox gives you a real, working WhatsApp number to
+test against in minutes, no Meta developer account needed at all.
+
+Quick setup: sign up free at twilio.com → Messaging → Try it out →
+Send a WhatsApp message → join the sandbox from your own WhatsApp with
+the join code shown → copy your Account SID and Auth Token from the
+Console → put them in `.env` → set the Sandbox's "WHEN A MESSAGE
+COMES IN" webhook to `<your-ngrok-url>/api/v1/twilio/webhook`.
+
+Both adapters share the exact same downstream pipeline (Conversation
+Agent, Supervisor, RAG, Voice, document ingestion) — only the
+payload format, signature scheme, and send mechanism differ, which is
+why they're separate modules rather than one with branching logic.
+Verified in the sandboxed build environment: Twilio's signature
+verification (valid/wrong-token/tampered-params/missing all tested,
+5/5 passing) and route registration — real end-to-end message
+delivery needs your own Twilio account and ngrok tunnel to test, same
+limitation as the Meta adapter.
 
 ## License
 
