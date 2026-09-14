@@ -3,10 +3,20 @@ Orchestrator — runs one full conversational turn through the agent
 pipeline:
 
   Conversation Agent (resolve references)
-        -> retrieve candidate chunks (if this owner has any documents)
+        -> retrieve candidate chunks from the CURRENT conversation
         -> Supervisor Agent (route) + relevance override
-        -> RAG pipeline  OR  general chat
+        -> RAG pipeline OR general chat
         -> Verification Agent (only for RAG answers)
+
+Conversation-aware security:
+
+  Every document retrieval is restricted by BOTH:
+
+      owner_id
+      conversation_id
+
+  This prevents a user who belongs to multiple conversations from
+  retrieving documents from the wrong conversation.
 
 ROUTING FIX (found via real-world testing): the Supervisor's LLM
 classification alone was found to misroute clearly document-related
@@ -24,6 +34,7 @@ there ARE no strong hits — to distinguish "general chat" from
 "document question with no matching content" — but it can no longer
 be the single point of failure that causes silent hallucination.
 """
+
 from app.agents.conversation_agent import resolve_query
 from app.agents.supervisor_agent import route_query
 from app.agents.verification_agent import correct_answer, verify_answer
@@ -33,6 +44,7 @@ from app.llm.groq_client import llm_gateway
 from app.rag.pipeline import answer_from_hits, retrieve
 from app.rag.vectorstore import vector_store
 
+
 GENERAL_CHAT_SYSTEM_PROMPT = (
     "You are a helpful assistant embedded in a WhatsApp conversation "
     "workflow. Use the conversation history for context. Keep replies "
@@ -41,37 +53,175 @@ GENERAL_CHAT_SYSTEM_PROMPT = (
 
 
 def _has_strong_hit(hits: list[dict]) -> bool:
-    return any(h["distance"] <= settings.relevance_distance_threshold for h in hits)
+    """
+    Determine whether at least one retrieved chunk is strongly relevant
+    to the user's question.
+
+    ChromaDB uses cosine distance here, so a LOWER distance means
+    greater similarity.
+    """
+    return any(
+        h["distance"] <= settings.relevance_distance_threshold
+        for h in hits
+    )
 
 
-def handle_turn(conversation_id: str, owner_id: str, message: str) -> dict:
-    conversation_store.add_turn(conversation_id, "user", message)
+def handle_turn(
+    conversation_id: str,
+    owner_id: str,
+    message: str,
+) -> dict:
+    """
+    Handle one complete conversational turn.
 
-    resolved_query = resolve_query(conversation_id, message)
+    Security:
+    Document discovery and retrieval are restricted to the current
+    conversation using:
 
-    # Only bother retrieving if this owner has indexed anything at all —
-    # avoids a pointless vector search + keeps plain chit-chat fast.
-    has_documents = bool(vector_store.list_documents(owner_id))
+        owner_id + conversation_id
+
+    The caller is responsible for ensuring that the authenticated
+    owner is authorized to access the conversation before this
+    function is called.
+    """
+
+    conversation_store.add_turn(
+        conversation_id,
+        "user",
+        message,
+    )
+
+    # ------------------------------------------------------------
+    # 1. Resolve references such as:
+    #
+    #    "What skills does he have?"
+    #
+    # into a more explicit query using conversation context.
+    # ------------------------------------------------------------
+    resolved_query = resolve_query(
+        conversation_id,
+        message,
+    )
+
+    # ------------------------------------------------------------
+    # 2. Check whether THIS conversation has indexed documents.
+    #
+    # IMPORTANT:
+    # Do NOT check only owner_id.
+    #
+    # A user may belong to multiple conversations. We only want
+    # documents associated with the current conversation.
+    # ------------------------------------------------------------
+    conversation_documents = vector_store.list_documents(
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+    )
+
+    has_documents = bool(conversation_documents)
+
+    # ------------------------------------------------------------
+    # 3. Retrieve candidate chunks from THIS conversation.
+    #
+    # VectorStore enforces:
+    #
+    #     owner_id
+    #     AND
+    #     conversation_id
+    #
+    # so documents from another conversation cannot enter the
+    # candidate set.
+    # ------------------------------------------------------------
     hits: list[dict] = []
+
     if has_documents:
-        hits = retrieve(resolved_query, owner_id)
+        hits = retrieve(
+            query=resolved_query,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+        )
 
-    llm_route = route_query(resolved_query)
-    use_rag = has_documents and (llm_route == "document_query" or _has_strong_hit(hits))
+    # ------------------------------------------------------------
+    # 4. Ask Supervisor Agent to classify the request.
+    # ------------------------------------------------------------
+    llm_route = route_query(
+        resolved_query
+    )
 
+    # ------------------------------------------------------------
+    # 5. Decide whether to use RAG.
+    #
+    # RAG is selected when:
+    #
+    #   - the current conversation has documents AND
+    #   - the supervisor classified it as document_query
+    #
+    # OR:
+    #
+    #   - there is a strongly relevant retrieved chunk.
+    #
+    # The relevance override prevents the supervisor from silently
+    # sending an obvious document question to general chat.
+    # ------------------------------------------------------------
+    use_rag = (
+        has_documents
+        and (
+            llm_route == "document_query"
+            or _has_strong_hit(hits)
+        )
+    )
+
+    # ------------------------------------------------------------
+    # 6. RAG path
+    # ------------------------------------------------------------
     if use_rag:
-        rag_result = answer_from_hits(hits, resolved_query)
-        verification = verify_answer(rag_result["answer"], rag_result["context"])
+        rag_result = answer_from_hits(
+            hits,
+            resolved_query,
+        )
+
+        # --------------------------------------------------------
+        # Verification Agent checks whether the generated answer
+        # is actually grounded in the retrieved context.
+        # --------------------------------------------------------
+        verification = verify_answer(
+            rag_result["answer"],
+            rag_result["context"],
+        )
 
         reply = rag_result["answer"]
-        if not verification["verified"]:
-            # Don't just flag hallucinated content — actually re-ground it.
-            reply = correct_answer(reply, rag_result["context"], resolved_query)
-            verification = verify_answer(reply, rag_result["context"])
-            if not verification["verified"] and verification["note"]:
-                reply += f"\n\n⚠️ Note: {verification['note']}"
 
-        conversation_store.add_turn(conversation_id, "assistant", reply)
+        # --------------------------------------------------------
+        # If verification fails, regenerate/re-ground the answer
+        # using ONLY the retrieved context.
+        # --------------------------------------------------------
+        if not verification["verified"]:
+            reply = correct_answer(
+                reply,
+                rag_result["context"],
+                resolved_query,
+            )
+
+            # Verify the corrected answer again.
+            verification = verify_answer(
+                reply,
+                rag_result["context"],
+            )
+
+            if (
+                not verification["verified"]
+                and verification["note"]
+            ):
+                reply += (
+                    f"\n\n⚠️ Note: "
+                    f"{verification['note']}"
+                )
+
+        conversation_store.add_turn(
+            conversation_id,
+            "assistant",
+            reply,
+        )
+
         return {
             "reply": reply,
             "agent_used": "rag_agent",
@@ -80,12 +230,34 @@ def handle_turn(conversation_id: str, owner_id: str, message: str) -> dict:
             "verified": verification["verified"],
         }
 
-    # general_chat route
-    history_text = conversation_store.as_text(conversation_id, limit=6)
-    prompt = f"Conversation history:\n{history_text}\n\nUser: {message}"
-    reply = llm_gateway.generate(GENERAL_CHAT_SYSTEM_PROMPT, prompt)
+    # ------------------------------------------------------------
+    # 7. General conversation path
+    #
+    # If the request is not routed to RAG, use recent conversation
+    # history for a normal conversational response.
+    # ------------------------------------------------------------
+    history_text = conversation_store.as_text(
+        conversation_id,
+        limit=6,
+    )
 
-    conversation_store.add_turn(conversation_id, "assistant", reply)
+    prompt = (
+        f"Conversation history:\n"
+        f"{history_text}\n\n"
+        f"User: {message}"
+    )
+
+    reply = llm_gateway.generate(
+        GENERAL_CHAT_SYSTEM_PROMPT,
+        prompt,
+    )
+
+    conversation_store.add_turn(
+        conversation_id,
+        "assistant",
+        reply,
+    )
+
     return {
         "reply": reply,
         "agent_used": "conversation_agent",

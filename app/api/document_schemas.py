@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -9,6 +11,7 @@ class IngestResponse(BaseModel):
 
 class DocumentQueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
+    conversation_id: Optional[str] = None
 
 
 class DocumentQueryResponse(BaseModel):
