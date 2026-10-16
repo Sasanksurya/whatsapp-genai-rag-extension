@@ -49,7 +49,7 @@ class LLMGateway:
             # GPT-OSS models use reasoning tokens as part of the
             # completion budget. Give the model enough room to
             # reason briefly and then produce the actual answer.
-            max_completion_tokens=4096,
+            max_completion_tokens=1024,
 
             # Low reasoning is sufficient for document Q&A and
             # prevents the model from spending the entire budget

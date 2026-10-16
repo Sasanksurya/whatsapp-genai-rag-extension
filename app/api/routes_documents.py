@@ -47,8 +47,6 @@ async def upload_document(
             detail="conversation_id is required for document uploads.",
         )
 
-    # Verify that the authenticated user is actually a member
-    # of the requested conversation.
     verify_conversation_membership(
         conversation_id,
         owner_id,
@@ -105,13 +103,14 @@ def query_documents(
 ):
     """
     Query documents belonging only to the authenticated user
-    and the requested conversation.
+    and the requested conversation, optionally narrowed to a
+    single document via payload.document_id.
 
     Security has two layers:
 
     1. Node verifies conversation membership.
-    2. ChromaDB filters retrieval using both owner_id
-       and conversation_id.
+    2. ChromaDB filters retrieval using owner_id, conversation_id,
+       and (when supplied) document_id.
     """
 
     if not payload.conversation_id:
@@ -120,8 +119,6 @@ def query_documents(
             detail="conversation_id is required for document queries.",
         )
 
-    # First authorization boundary:
-    # confirm the authenticated user belongs to the conversation.
     verify_conversation_membership(
         payload.conversation_id,
         owner_id,
@@ -132,6 +129,7 @@ def query_documents(
             query=payload.query,
             owner_id=owner_id,
             conversation_id=payload.conversation_id,
+            document_id=payload.document_id,
         )
 
     except RuntimeError as e:
@@ -152,6 +150,7 @@ def query_documents(
         {
             "query": payload.query,
             "conversation_id": payload.conversation_id,
+            "document_id": payload.document_id,
             "sources": result["sources"],
         },
     )
@@ -175,7 +174,6 @@ def list_documents(
     """
 
     if conversation_id:
-        # Verify membership before exposing conversation documents.
         verify_conversation_membership(
             conversation_id,
             owner_id,

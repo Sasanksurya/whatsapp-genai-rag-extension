@@ -12,6 +12,7 @@ class IngestResponse(BaseModel):
 class DocumentQueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
     conversation_id: Optional[str] = None
+    document_id: Optional[str] = None
 
 
 class DocumentQueryResponse(BaseModel):

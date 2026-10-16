@@ -1,38 +1,12 @@
+
 """
-Orchestrator — runs one full conversational turn through the agent
-pipeline:
+Orchestrator for conversation-aware document Q&A.
 
-  Conversation Agent (resolve references)
-        -> retrieve candidate chunks from the CURRENT conversation
-        -> Supervisor Agent (route) + relevance override
-        -> RAG pipeline OR general chat
-        -> Verification Agent (only for RAG answers)
+Document retrieval is scoped by:
+    owner_id + conversation_id + optional document_id
 
-Conversation-aware security:
-
-  Every document retrieval is restricted by BOTH:
-
-      owner_id
-      conversation_id
-
-  This prevents a user who belongs to multiple conversations from
-  retrieving documents from the wrong conversation.
-
-ROUTING FIX (found via real-world testing): the Supervisor's LLM
-classification alone was found to misroute clearly document-related
-questions (e.g. "What skills does he have?") to general_chat, which
-skipped retrieval entirely and let the model hallucinate freely from
-conversation history instead of the actual resume. A small
-classifier model guessing intent from text alone isn't reliable
-enough to gate RAG access on its own.
-
-The fix: retrieve candidate chunks FIRST (cheap — it's a local
-vector search, not an LLM call), and if any hit is strongly relevant
-(low cosine distance), route to RAG regardless of what the
-classifier said. The classifier is still used for the case where
-there ARE no strong hits — to distinguish "general chat" from
-"document question with no matching content" — but it can no longer
-be the single point of failure that causes silent hallucination.
+Document questions should be grounded in retrieved context rather
+than answered from general conversation history.
 """
 
 from app.agents.conversation_agent import resolve_query
@@ -52,37 +26,51 @@ GENERAL_CHAT_SYSTEM_PROMPT = (
 )
 
 
-def _has_strong_hit(hits: list[dict]) -> bool:
-    """
-    Determine whether at least one retrieved chunk is strongly relevant
-    to the user's question.
+DOCUMENT_QUESTION_SYSTEM_PROMPT = (
+    "You answer questions about documents using only the supplied "
+    "document context. If a field contains a placeholder such as "
+    "[Start Date], state that the actual value has not been provided "
+    "and quote the placeholder. Never invent dates, names, amounts, "
+    "or other missing values."
+)
 
-    ChromaDB uses cosine distance here, so a LOWER distance means
-    greater similarity.
-    """
+
+def _has_strong_hit(hits: list[dict]) -> bool:
+    """Return whether any retrieved chunk passes the relevance threshold."""
     return any(
-        h["distance"] <= settings.relevance_distance_threshold
+        h.get("distance", float("inf"))
+        <= settings.relevance_distance_threshold
         for h in hits
     )
+
+
+def _looks_like_document_question(message: str) -> bool:
+    """
+    Lightweight safeguard for common document questions.
+    The supervisor remains useful, but should not be the only
+    mechanism determining whether a question needs document context.
+    """
+    terms = (
+        "document", "pdf", "file", "offer letter", "joining date",
+        "probation", "salary", "ctc", "resume", "cv", "contract",
+        "notice period", "mentioned in", "according to", "in the",
+        "from the", "what does", "which date", "what date",
+    )
+    text = message.casefold()
+    return any(term in text for term in terms)
 
 
 def handle_turn(
     conversation_id: str,
     owner_id: str,
     message: str,
+    document_id: str | None = None,
 ) -> dict:
     """
-    Handle one complete conversational turn.
+    Process a conversational turn.
 
-    Security:
-    Document discovery and retrieval are restricted to the current
-    conversation using:
-
-        owner_id + conversation_id
-
-    The caller is responsible for ensuring that the authenticated
-    owner is authorized to access the conversation before this
-    function is called.
+    The caller must authenticate the owner and verify membership
+    in the requested conversation before calling this function.
     """
 
     conversation_store.add_turn(
@@ -91,27 +79,11 @@ def handle_turn(
         message,
     )
 
-    # ------------------------------------------------------------
-    # 1. Resolve references such as:
-    #
-    #    "What skills does he have?"
-    #
-    # into a more explicit query using conversation context.
-    # ------------------------------------------------------------
     resolved_query = resolve_query(
         conversation_id,
         message,
     )
 
-    # ------------------------------------------------------------
-    # 2. Check whether THIS conversation has indexed documents.
-    #
-    # IMPORTANT:
-    # Do NOT check only owner_id.
-    #
-    # A user may belong to multiple conversations. We only want
-    # documents associated with the current conversation.
-    # ------------------------------------------------------------
     conversation_documents = vector_store.list_documents(
         owner_id=owner_id,
         conversation_id=conversation_id,
@@ -119,18 +91,17 @@ def handle_turn(
 
     has_documents = bool(conversation_documents)
 
-    # ------------------------------------------------------------
-    # 3. Retrieve candidate chunks from THIS conversation.
-    #
-    # VectorStore enforces:
-    #
-    #     owner_id
-    #     AND
-    #     conversation_id
-    #
-    # so documents from another conversation cannot enter the
-    # candidate set.
-    # ------------------------------------------------------------
+    # If the client supplies a document ID, verify that it belongs
+    # to this authenticated owner and conversation before retrieval.
+    if document_id:
+        allowed_ids = {
+            doc["document_id"] for doc in conversation_documents
+        }
+        if document_id not in allowed_ids:
+            raise ValueError(
+                "The requested document is not available in this conversation."
+            )
+
     hits: list[dict] = []
 
     if has_documents:
@@ -138,83 +109,62 @@ def handle_turn(
             query=resolved_query,
             owner_id=owner_id,
             conversation_id=conversation_id,
+            document_id=document_id,
         )
 
-    # ------------------------------------------------------------
-    # 4. Ask Supervisor Agent to classify the request.
-    # ------------------------------------------------------------
-    llm_route = route_query(
-        resolved_query
+    llm_route = route_query(resolved_query)
+
+    is_document_question = (
+        document_id is not None
+        or llm_route == "document_query"
+        or _looks_like_document_question(message)
+        or _looks_like_document_question(resolved_query)
+        or _has_strong_hit(hits)
     )
 
-    # ------------------------------------------------------------
-    # 5. Decide whether to use RAG.
-    #
-    # RAG is selected when:
-    #
-    #   - the current conversation has documents AND
-    #   - the supervisor classified it as document_query
-    #
-    # OR:
-    #
-    #   - there is a strongly relevant retrieved chunk.
-    #
-    # The relevance override prevents the supervisor from silently
-    # sending an obvious document question to general chat.
-    # ------------------------------------------------------------
-    use_rag = (
-        has_documents
-        and (
-            llm_route == "document_query"
-            or _has_strong_hit(hits)
-        )
-    )
-
-    # ------------------------------------------------------------
-    # 6. RAG path
-    # ------------------------------------------------------------
-    if use_rag:
-        rag_result = answer_from_hits(
-            hits,
-            resolved_query,
-        )
-
-        # --------------------------------------------------------
-        # Verification Agent checks whether the generated answer
-        # is actually grounded in the retrieved context.
-        # --------------------------------------------------------
-        verification = verify_answer(
-            rag_result["answer"],
-            rag_result["context"],
-        )
-
-        reply = rag_result["answer"]
-
-        # --------------------------------------------------------
-        # If verification fails, regenerate/re-ground the answer
-        # using ONLY the retrieved context.
-        # --------------------------------------------------------
-        if not verification["verified"]:
-            reply = correct_answer(
-                reply,
-                rag_result["context"],
-                resolved_query,
+    # A document question must not silently become general chat.
+    if is_document_question:
+        if not has_documents:
+            reply = (
+                "There are no indexed documents available in this "
+                "conversation yet. Upload a document and try again."
             )
+            sources = []
+            verified = False
+        elif not hits:
+            reply = (
+                "I couldn't find relevant information in the available "
+                "documents. I can't confirm an answer from the documents."
+            )
+            sources = []
+            verified = False
+        else:
+            rag_result = answer_from_hits(hits, resolved_query)
+            reply = rag_result["answer"]
+            sources = rag_result["sources"]
 
-            # Verify the corrected answer again.
             verification = verify_answer(
                 reply,
                 rag_result["context"],
             )
 
-            if (
-                not verification["verified"]
-                and verification["note"]
-            ):
-                reply += (
-                    f"\n\n⚠️ Note: "
-                    f"{verification['note']}"
+            if not verification["verified"]:
+                corrected = correct_answer(
+                    reply,
+                    rag_result["context"],
+                    resolved_query,
                 )
+
+                corrected_verification = verify_answer(
+                    corrected,
+                    rag_result["context"],
+                )
+
+                if corrected_verification["verified"]:
+                    reply = corrected
+                    verification = corrected_verification
+
+            verified = verification["verified"]
 
         conversation_store.add_turn(
             conversation_id,
@@ -226,24 +176,18 @@ def handle_turn(
             "reply": reply,
             "agent_used": "rag_agent",
             "resolved_query": resolved_query,
-            "sources": rag_result["sources"],
-            "verified": verification["verified"],
+            "sources": sources,
+            "verified": verified,
         }
 
-    # ------------------------------------------------------------
-    # 7. General conversation path
-    #
-    # If the request is not routed to RAG, use recent conversation
-    # history for a normal conversational response.
-    # ------------------------------------------------------------
+    # General chat is reserved for questions that don't need documents.
     history_text = conversation_store.as_text(
         conversation_id,
         limit=6,
     )
 
     prompt = (
-        f"Conversation history:\n"
-        f"{history_text}\n\n"
+        f"Conversation history:\n{history_text}\n\n"
         f"User: {message}"
     )
 

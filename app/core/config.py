@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = "./data/chroma"
     chunk_size: int = 800
     chunk_overlap: int = 120
-    retrieval_top_k: int = 8
+    retrieval_top_k: int = 35
     relevance_distance_threshold: float = 0.9
 
     # MCP — Google Drive OAuth

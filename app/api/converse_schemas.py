@@ -1,9 +1,21 @@
+
 from pydantic import BaseModel, Field
 
 
 class ConverseRequest(BaseModel):
-    conversation_id: str = Field(..., description="Groups turns into one chat thread")
-    message: str = Field(..., min_length=1, max_length=4000)
+    conversation_id: str = Field(
+        ...,
+        description="Groups turns into one chat thread",
+    )
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+    )
+    document_id: str | None = Field(
+        default=None,
+        description="Optional document ID to restrict document retrieval",
+    )
 
 
 class ConverseResponse(BaseModel):

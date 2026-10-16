@@ -1,24 +1,55 @@
-venv/
-__pycache__/
-*.pyc
+# Local vector database
+/chroma_db/
+
+# Temporary backups
+*.backup
+*_backup.py
+*_before_*.py
+
+# Retrieval diagnostics and debug logs
+candidate_diagnostic*
+chunk45_diagnostics.txt
+diagnose_chunk*
+inspect_chunks.py
+inspect_documents.py
+retrieval_*.log
+diagnose_chunk45.log
+
+# Experimental evaluation outputs
+eval_*.jsonl
+eval_*_details.json
+eval_*.json
+bm25_*.jsonl
+bm25_*_details.json
+hb_expansion_*.jsonl
+hb_expansion_*_details.json
+hybrid_*.jsonl
+hybrid_*_details.json
+weighted_sparse_rrf*
+final_weighted_rrf*
+tokenizer_greek_test*
+gradient_chunks.json
+
+
+# Environment secrets
 .env
-credentials.json
-data/chroma/
-data/drive_tokens/
+.env.*
+!.env.example
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Private keys and certificates
+*.key
+*.crt
+*.pem
+
+
+
+# Sensitive application configuration and logs
 data/api_keys.json
 data/audit.log
-.pytest_cache/
 
-# Node.js backend
-whatsapp_backend/node_modules/
-whatsapp_backend/dist/
-whatsapp_backend/.env
-whatsapp_backend/*.key
-whatsapp_backend/*.crt
-
-# React frontend
-whatsapp/node_modules/
-whatsapp/dist/
-whatsapp/.env
-whatsapp/*.key
-whatsapp/*.crt
+# Local ChromaDB storage
+data/chroma/
