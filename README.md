@@ -1,6 +1,8 @@
-# WhatsApp GenAI RAG
+# WhatsApp GenAI Extension — Secure Multi-Agent RAG for Document & Data Retrieval
 
-A document-question-answering application that ingests PDF documents, retrieves relevant passages, and generates answers grounded in those passages. The project combines a FastAPI RAG service with a Node.js backend and uses hybrid retrieval to improve recall and relevance.
+![CI](https://github.com/Sasanksurya/whatsapp-genai-rag-extension/actions/workflows/ci.yml/badge.svg)
+
+A document-question-answering application that ingests PDF documents, retrieves relevant passages, and generates answers grounded in those passages. The project combines a FastAPI RAG service with a Node.js backend and uses hybrid retrieval (dense + BM25 with Reciprocal Rank Fusion, plus optional cross-encoder reranking) to improve recall and relevance.
 
 > **Project status:** Core upload and query flows have been tested locally. `Gradient.pdf` was indexed into 149 chunks; the query endpoint returned HTTP 200, cited `Gradient.pdf`, and an unrelated question received an insufficient-information response. These are manual test results, not a claim of production readiness.
 
@@ -11,11 +13,13 @@ A document-question-answering application that ingests PDF documents, retrieves 
 - [Technology stack](#technology-stack)
 - [Project structure](#project-structure)
 - [Prerequisites](#prerequisites)
-- [Setup and run locally](#setup-and-run-locally)
+- [Quick start (Docker)](#quick-start-docker)
+- [Run locally without Docker](#run-locally-without-docker)
 - [Environment configuration](#environment-configuration)
 - [API endpoints](#api-endpoints)
 - [Retrieval and answer generation](#retrieval-and-answer-generation)
 - [Evaluation](#evaluation)
+- [Continuous integration](#continuous-integration)
 - [Limitations](#limitations)
 - [Security checklist](#security-checklist)
 - [Troubleshooting](#troubleshooting)
@@ -80,13 +84,15 @@ The exact request/authentication flow depends on the current application configu
 - **FastAPI + Uvicorn:** HTTP API and local development server
 - **ChromaDB:** vector storage
 - **Sparse retrieval:** BM25 (`rank_bm25`)
-- **Dense retrieval:** embedding-based similarity search
+- **Dense retrieval:** embedding-based similarity search (`sentence-transformers`)
 - **RRF:** combines retrieval rankings
 - **Optional reranker:** cross-encoder reranking
 - **Groq:** LLM API client
 - **Node.js:** backend integration
 - **Redis-compatible service:** Memurai on Windows for local development
 - **MongoDB Atlas:** database service
+- **Docker + Docker Compose:** containerized RAG service
+- **GitHub Actions:** CI (lint, tests, Docker build)
 
 Check `requirements.txt`, `package.json`, and the source files for the exact package versions used by your checkout.
 
@@ -95,7 +101,10 @@ Check `requirements.txt`, `package.json`, and the source files for the exact pac
 Relevant files and folders include:
 
 ```text
-whatsapp-genai-rag/
+whatsapp-genai-rag-extension/
+├── .github/
+│   └── workflows/
+│       └── ci.yml          # CI: lint, tests, Docker build
 ├── app/
 │   ├── main.py
 │   ├── core/
@@ -109,13 +118,19 @@ whatsapp-genai-rag/
 │       ├── pipeline.py
 │       ├── retrieval.py
 │       └── vectorstore.py
-├── data/                 # Local documents/data; don't commit private files
-├── tests/                # Tests, if present in this checkout
-├── venv/                 # Local virtual environment; do not commit
+├── data/                   # Local documents/data; don't commit private files
+├── docs/
+├── static/
+├── tests/
 ├── whatsapp_backend/
 │   ├── package.json
 │   └── ...
-├── .env                  # Local secrets; do not commit
+├── .env                    # Local secrets; do not commit
+├── .env.example            # Placeholder configuration
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt        # Runtime dependencies
+├── requirements-dev.txt    # Runtime + pytest + ruff
 └── README.md
 ```
 
@@ -123,40 +138,50 @@ This is a guide to the known project layout; actual optional files may differ.
 
 ## Prerequisites
 
-- Windows with PowerShell (commands below use Windows paths).
-- Python 3.11, matching the version used during development.
-- Node.js and npm.
-- A running Redis-compatible service. In the local Windows setup, Memurai listens on port `6379`.
-- A reachable MongoDB Atlas cluster and an Atlas IP access-list entry for your current public IP.
-- A Groq API key and any application-specific API key/configuration required by the project.
+- **Docker route:** Docker Desktop (with WSL 2 on Windows).
+- **Local route:** Python (3.11 was used during development; the Docker image and CI use 3.12), Node.js and npm.
+- A Groq API key (free tier at <https://console.groq.com/keys>).
+- For endpoints that verify conversation membership: a running Node.js backend, a Redis-compatible service (Memurai on port `6379` in the local Windows setup), and a reachable MongoDB Atlas cluster with your current public IP in the Atlas access list.
 
-## Setup and run locally
+## Quick start (Docker)
 
-Run the following commands in **two separate VS Code terminals**. Keep both terminals open while testing.
+This starts the FastAPI RAG service in a container.
+
+```powershell
+copy .env.example .env      # macOS/Linux: cp .env.example .env
+# open .env and set GROQ_API_KEY
+docker compose up --build
+```
+
+When the logs show Uvicorn running, open the interactive API docs at <http://localhost:8000/docs>.
+
+Notes:
+
+- The first build is slow (it downloads PyTorch, using the CPU-only build to keep the image smaller). The first query is also slow because the embedding model is downloaded once, then cached in the data volume.
+- Data (vector DB, model cache) is stored in the named Docker volume `app_data`, so it survives restarts. `docker compose down` stops the service and keeps the data; `docker compose down -v` also deletes it.
+- The container runs as a non-root user and defines a health check against `/docs`.
+- Docker Compose runs the **FastAPI service only**. The Node.js backend, Redis-compatible service and MongoDB are not part of the compose file. Endpoints that verify conversation membership through the Node.js backend need that backend running (see below). If the FastAPI configuration points at `localhost` for the backend, note that `localhost` inside a container is the container itself; on Docker Desktop use `host.docker.internal` instead.
+
+## Run locally without Docker
+
+Run the following in **two separate terminals** from the repository root. Keep both open while testing.
 
 ### 1. Start the Node.js backend
 
 ```powershell
-cd D:\whatsapp-genai-project\whatsapp-genai-rag\whatsapp_backend
+cd whatsapp_backend
 npm install
 npm start
 ```
 
-The backend has a `start` script that runs its TypeScript watcher and Node process. Look for a message indicating that the server is listening on port `5000`. Also confirm MongoDB and Redis connections succeed.
+The backend has a `start` script that runs its TypeScript watcher and Node process. Look for a message indicating that the server is listening on port `5000`, and confirm that the MongoDB and Redis connections succeed.
 
 ### 2. Start the FastAPI service
 
 ```powershell
-cd D:\whatsapp-genai-project\whatsapp-genai-rag
-.\venv\Scripts\Activate.ps1
-```
-
-If the virtual environment does not exist yet, create it and install the project's dependencies from the requirements file if present:
-
-```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 ```
 
 Set conservative numerical-library thread limits in this terminal if needed for your Windows environment:
@@ -178,32 +203,30 @@ Open the interactive API documentation:
 - Swagger UI: <http://127.0.0.1:8000/docs>
 - Local API base URL: `http://127.0.0.1:8000`
 
-If the `requirements.txt` file is absent, inspect the repository's dependency files and install the dependencies specified by the project rather than guessing versions.
+### Run the tests
+
+```powershell
+python -m pip install -r requirements-dev.txt
+pytest tests/ -v
+```
 
 ## Environment configuration
 
-Create a local `.env` file using the variable names expected by the current source code. **Do not commit the real `.env` file or paste its secrets into issues, screenshots, or chat.**
+Copy `.env.example` to `.env` and fill in your values. **Do not commit the real `.env` file or paste its secrets into issues, screenshots, or chat.**
 
-Configuration used by the project may include:
-
-| Purpose | Variable name / location | Notes |
+| Purpose | Variable name | Notes |
 |---|---|---|
-| MongoDB Atlas URI | `DATABASE` (reported in this project setup) | Contains credentials; keep secret. Verify this name in `whatsapp_backend` source/config. |
-| Groq API key | Check `app/llm/groq_client.py` and `app/core/config.py` | Use the exact variable name read by the code. |
-| Redis/Memurai connection | Check Node.js Redis client configuration | Local service was tested at `127.0.0.1:6379`; verify the expected env variable name. |
-| Application/API key | Check FastAPI authentication/configuration and Swagger's `X-API-Key` header | Store the real key securely; never publish it. |
-| Other application settings | `app/core/config.py` and backend config files | Use the exact names and defaults defined by the application. |
+| Groq API key | `GROQ_API_KEY` | Required. Free key from console.groq.com. |
+| Groq model | `GROQ_MODEL` | Default in `.env.example`: `llama-3.3-70b-versatile`. |
+| Whisper model size | `WHISPER_MODEL_SIZE` | Voice transcription model size. |
+| Rate limiting | `RATE_LIMIT_MAX_REQUESTS`, `RATE_LIMIT_WINDOW_SECONDS` | Requests allowed per window. |
+| Drive token encryption | `DRIVE_TOKEN_ENCRYPTION_KEY` | Generate with the command in `.env.example`. |
+| Retrieval relevance | `RELEVANCE_DISTANCE_THRESHOLD` | Lower is stricter. |
+| WhatsApp / Twilio | `WHATSAPP_*`, `TWILIO_*` | Needed only for the WhatsApp adapters. |
+| MongoDB Atlas URI | `DATABASE` (reported in this setup) | Node.js backend. Contains credentials; keep secret. Verify the name in the `whatsapp_backend` source/config. |
+| Redis connection | See the Node.js Redis client configuration | Tested locally at `127.0.0.1:6379`; verify the expected variable name. |
 
-Example placeholders only (not a complete working `.env`):
-
-```dotenv
-# Replace names with those actually read by your application.
-DATABASE=<your-mongodb-atlas-connection-string>
-GROQ_API_KEY=<your-groq-api-key>
-REDIS_URL=redis://127.0.0.1:6379
-```
-
-Do not copy this sample blindly: variable names differ between projects. Confirm the actual names in the source before using it. Never add real credentials to the README.
+Never add real credentials to this README.
 
 ## API endpoints
 
@@ -275,6 +298,15 @@ Manual checks completed during local development:
 
 The mathematical answer was refined with stronger prompt instructions after an incorrect coefficient appeared in an earlier response. Recheck exact equations against the source PDF before claiming all mathematical outputs are fully validated.
 
+## Continuous integration
+
+Every push to `main` and every pull request runs a GitHub Actions workflow (`.github/workflows/ci.yml`) that:
+
+1. Installs CPU-only PyTorch and the dev dependencies (`requirements-dev.txt`).
+2. Runs `ruff` for serious errors only (syntax errors and undefined names). A full style-lint pass is planned once the existing style issues are cleaned up.
+3. Runs `pytest tests/ -v`.
+4. Builds the Docker image to confirm the Dockerfile works.
+
 ## Limitations
 
 - The evaluation dataset is small; metrics may not generalize to other documents or query types.
@@ -283,7 +315,7 @@ The mathematical answer was refined with stronger prompt instructions after an i
 - PDF extraction quality varies with scanned pages, tables, equations, columns, and unusual formatting.
 - A source filename citation does not prove every statement is supported; chunk-level evidence and answer faithfulness should be evaluated separately.
 - Redis, MongoDB Atlas, Groq, and any authentication service must be reachable and correctly configured.
-- Local development commands and Windows paths may need adaptation for Linux, containers, or production hosting.
+- There is no hosted deployment yet; the project is run locally or with Docker.
 
 ## Security checklist
 
@@ -318,12 +350,15 @@ Only include `!.env.example` if that example file contains placeholders and no r
 
 ## Troubleshooting
 
+### `docker` is not recognized, or the Docker engine is not running
+
+Install Docker Desktop, start it, and wait until it shows **Engine running**. Then open a new terminal and run `docker compose up --build` again.
+
 ### `No such file or directory: app/rag/pipeline.py`
 
-Change into the project root before running Python commands:
+Change into the repository root before running Python commands:
 
 ```powershell
-cd D:\whatsapp-genai-project\whatsapp-genai-rag
 python -m py_compile app\rag\pipeline.py
 ```
 
@@ -336,7 +371,7 @@ ChromaDB telemetry messages such as `capture() takes 1 positional argument but 3
 Start the backend from its own folder:
 
 ```powershell
-cd D:\whatsapp-genai-project\whatsapp-genai-rag\whatsapp_backend
+cd whatsapp_backend
 npm start
 ```
 
@@ -346,10 +381,4 @@ Check that the Atlas cluster is active, the current public IP is permitted in Ne
 
 ### Redis connection timeout
 
-Check that Memurai is running and port `6379` is reachable. A successful Python ping confirms that local Redis-compatible service responds to that Python client, but does not by itself prove the Node.js client uses the same host and configuration.
-
----
-
-## Submission notes
-
-Before submission, replace any placeholder instructions with the exact configuration names from the current source code, verify the dependency files are present, review `.gitignore`, and run the smoke tests from fresh terminals. Do not include private documents or secrets unless the submission explicitly requires them and you are authorized to share them.
+Check that Memurai is running and port `6379` is reachable. A successful Python ping confirms that the local Redis-compatible service responds to that Python client, but does not by itself prove the Node.js client uses the same host and configuration.
