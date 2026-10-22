@@ -25,3 +25,4 @@ faster-whisper
 # --- Phase 5: security hardening ---
 cryptography==43.0.1
 twilio>=9.0
+rank-bm25>=0.2.2
